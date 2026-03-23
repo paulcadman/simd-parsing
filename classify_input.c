@@ -70,6 +70,33 @@ uint8x16_t classify(uint8x16_t input) {
     return vandq_u8(low_lookup, high_lookup);
 }
 
+size_t get_indices(uint8x16_t classified, uint8_t* indices) {
+    uint8x16_t mask = vdupq_n_u8(0);
+    // indicator[i] = if classified[i] == 0 then 0x00 else 0xFF
+    uint8x16_t indicator = vcgtq_u8(classified, mask);
+
+    uint8_t indicator_out[16] = {};
+    vst1q_u8(indicator_out, indicator);
+
+    // compress indicator bytes into a 16-bit bitset (1 byte becomes 1 bit).
+    // bits are stored in reverse order so that the trailing zeros gives the correct
+    // index (compatible with the ctz = count trailing zeros instruction)
+    uint16_t bitset = 0;
+    for (size_t i = 0; i < 16; i++) {
+        bitset |= (indicator_out[i] >> 7) << i;
+    }
+
+    // extract the indices of the set bits in the bitset
+    size_t num_indices = 0;
+    while (bitset != 0) {
+        uint8_t idx = __builtin_ctz(bitset);
+        indices[num_indices++] = idx;
+        // Clear the least-significant set bit
+        bitset &= bitset - 1;
+    }
+    return num_indices;
+}
+
 int main(void) {
     uint8_t input[16] = "hello[world,foo ";
     uint8x16_t bytes = vld1q_u8(input);
@@ -78,6 +105,9 @@ int main(void) {
 
     uint8_t out[16] = {};
     vst1q_u8(out, classified);
+
+    uint8_t indices[16] = {};
+    size_t num_indices = get_indices(classified, indices);
 
     printf("---------LOW_NIBBLES----------\n");
     for (size_t i = 0; i < 16; i++) {
@@ -96,5 +126,12 @@ int main(void) {
     printf("---------input classification----------\n");
     for (size_t i = 0; i < 16; i++) {
         printf("%02zu '%c' -> 0x%02x\n", i, input[i], out[i]);
+    }
+    printf("\n");
+    printf("\n");
+
+    printf("---------indices----------\n");
+    for (size_t i = 0; i < num_indices; i++) {
+        printf("%02d -> '%c'\n", indices[i], input[indices[i]]);
     }
 }
