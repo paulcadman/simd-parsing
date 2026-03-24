@@ -70,7 +70,18 @@ uint8x16_t classify(uint8x16_t input) {
     return vandq_u8(low_lookup, high_lookup);
 }
 
-size_t get_indices(uint8x16_t classified, uint8_t* indices) {
+// This is adapted from _mm_movemask_epi8 in
+//https://developer.arm.com/community/arm-community-blogs/b/servers-and-cloud-computing-blog/posts/porting-x86-vector-bitmask-optimizations-to-arm-neon
+uint16_t make_bitmask(uint8x16_t classified) {
+    uint8x16_t indicator = vcgtq_u8(classified, vdupq_n_u8(0));
+    uint16x8_t high_bits = vreinterpretq_u16_u8(vshrq_n_u8(indicator, 7));
+    uint32x4_t paired16 = vreinterpretq_u32_u16(vsraq_n_u16(high_bits, high_bits, 7));
+    uint64x2_t paired32 = vreinterpretq_u64_u32(vsraq_n_u32(paired16, paired16, 14));
+    uint8x16_t paired64 = vreinterpretq_u8_u64(vsraq_n_u64(paired32, paired32, 28));
+    return (uint16_t)vgetq_lane_u8(paired64, 0) | ((uint16_t)vgetq_lane_u8(paired64, 8) << 8);
+}
+
+size_t get_indices_loop(uint8x16_t classified, uint8_t* indices) {
     uint8x16_t mask = vdupq_n_u8(0);
     // indicator[i] = if classified[i] == 0 then 0x00 else 0xFF
     uint8x16_t indicator = vcgtq_u8(classified, mask);
@@ -97,6 +108,18 @@ size_t get_indices(uint8x16_t classified, uint8_t* indices) {
     return num_indices;
 }
 
+size_t get_indices_movemask(uint8x16_t classified, uint8_t* indices) {
+    uint16_t bitset = make_bitmask(classified);
+
+    size_t num_indices = 0;
+    while (bitset != 0) {
+        uint8_t idx = __builtin_ctz(bitset);
+        indices[num_indices++] = idx;
+        bitset &= bitset - 1;
+    }
+    return num_indices;
+}
+
 int main(void) {
     uint8_t input[16] = "hello[world,foo ";
     uint8x16_t bytes = vld1q_u8(input);
@@ -106,8 +129,11 @@ int main(void) {
     uint8_t out[16] = {};
     vst1q_u8(out, classified);
 
-    uint8_t indices[16] = {};
-    size_t num_indices = get_indices(classified, indices);
+    uint8_t loop_indices[16] = {};
+    size_t num_loop_indices = get_indices_loop(classified, loop_indices);
+
+    uint8_t movemask_indices[16] = {};
+    size_t num_movemask_indices = get_indices_movemask(classified, movemask_indices);
 
     printf("---------LOW_NIBBLES----------\n");
     for (size_t i = 0; i < 16; i++) {
@@ -130,8 +156,15 @@ int main(void) {
     printf("\n");
     printf("\n");
 
-    printf("---------indices----------\n");
-    for (size_t i = 0; i < num_indices; i++) {
-        printf("%02d -> '%c'\n", indices[i], input[indices[i]]);
+    printf("---------loop indices----------\n");
+    for (size_t i = 0; i < num_loop_indices; i++) {
+        printf("%02d -> '%c'\n", loop_indices[i], input[loop_indices[i]]);
+    }
+    printf("\n");
+    printf("\n");
+
+    printf("---------movemask indices----------\n");
+    for (size_t i = 0; i < num_movemask_indices; i++) {
+        printf("%02d -> '%c'\n", movemask_indices[i], input[movemask_indices[i]]);
     }
 }
