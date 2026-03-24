@@ -81,6 +81,15 @@ uint16_t make_bitmask(uint8x16_t classified) {
     return (uint16_t)vgetq_lane_u8(paired64, 0) | ((uint16_t)vgetq_lane_u8(paired64, 8) << 8);
 }
 
+// This is adapted from the shrn 'getting a mask for comparing 128-bit chunks' example in
+// https://developer.arm.com/community/arm-community-blogs/b/servers-and-cloud-computing-blog/posts/porting-x86-vector-bitmask-optimizations-to-arm-neon
+uint64_t make_shrn_mask(uint8x16_t classified) {
+    uint16x8_t indicator = vreinterpretq_u16_u8(vcgtq_u8(classified, vdupq_n_u8(0)));
+    uint8x8_t packed = vshrn_n_u16(indicator, 4);
+    uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(packed), 0);
+    return matches & 0x8888888888888888ULL;
+}
+
 size_t get_indices_loop(uint8x16_t classified, uint8_t* indices) {
     uint8x16_t mask = vdupq_n_u8(0);
     // indicator[i] = if classified[i] == 0 then 0x00 else 0xFF
@@ -120,6 +129,18 @@ size_t get_indices_movemask(uint8x16_t classified, uint8_t* indices) {
     return num_indices;
 }
 
+size_t get_indices_shrn(uint8x16_t classified, uint8_t* indices) {
+    uint64_t bitset = make_shrn_mask(classified);
+
+    size_t num_indices = 0;
+    while (bitset != 0) {
+        uint8_t idx = __builtin_ctzll(bitset) >> 2;
+        indices[num_indices++] = idx;
+        bitset &= bitset - 1;
+    }
+    return num_indices;
+}
+
 int main(void) {
     uint8_t input[16] = "hello[world,foo ";
     uint8x16_t bytes = vld1q_u8(input);
@@ -134,6 +155,9 @@ int main(void) {
 
     uint8_t movemask_indices[16] = {};
     size_t num_movemask_indices = get_indices_movemask(classified, movemask_indices);
+
+    uint8_t shrn_indices[16] = {};
+    size_t num_shrn_indices = get_indices_shrn(classified, shrn_indices);
 
     printf("---------LOW_NIBBLES----------\n");
     for (size_t i = 0; i < 16; i++) {
@@ -166,5 +190,12 @@ int main(void) {
     printf("---------movemask indices----------\n");
     for (size_t i = 0; i < num_movemask_indices; i++) {
         printf("%02d -> '%c'\n", movemask_indices[i], input[movemask_indices[i]]);
+    }
+    printf("\n");
+    printf("\n");
+
+    printf("---------shrn indices----------\n");
+    for (size_t i = 0; i < num_shrn_indices; i++) {
+        printf("%02d -> '%c'\n", shrn_indices[i], input[shrn_indices[i]]);
     }
 }
