@@ -4,15 +4,15 @@
 
 enum category {
   // ',' = 0x2c
-  CAT_COMMA = 1u << 0,
+  CAT_COMMA = 1u << 0, // 0b0000_0001
   // ':' = 0x3a
-  CAT_COLON = 1u << 1,
+  CAT_COLON = 1u << 1, // 0b0000_0010
   // '[', ']', '{', '}' = 0x5b, 0x5d, 0x7b, 0x7d
-  CAT_BRACKET = 1u << 2,
+  CAT_BRACKET = 1u << 2, // 0b0000_0100
   // '\t', '\n', '\r' = 0x09, 0x0a, 0x0d
-  CAT_WS = 1u << 3,
+  CAT_WS = 1u << 3, // 0b0000_1000
   // ' ' = 0x20
-  CAT_SPACE = 1u << 4
+  CAT_SPACE = 1u << 4 // 0b0001_0000
 };
 
 static uint8_t LOW_NIBBLES[16] = {
@@ -25,7 +25,7 @@ static uint8_t LOW_NIBBLES[16] = {
     /* 6 */ 0,
     /* 7 */ 0,
     /* 8 */ 0,
-    /* 9 */ CAT_WS,               // 0x0
+    /* 9 */ CAT_WS,               // 0x09, 0x0a, 0x0d
     /* a */ CAT_COLON | CAT_WS,   // 0x3a, 0x0a
     /* b */ CAT_BRACKET,          // 0x5b, 0x7b
     /* c */ CAT_COMMA,            // 0x2c
@@ -56,22 +56,52 @@ uint8x16_t classify(uint8x16_t input) {
     uint8x16_t high_nibbles = vld1q_u8(HIGH_NIBBLES);
 
     // Apply `b & 0x0f` to each input byte
+    // example: input = [0b0011_1100, 0b1111_0010, ...], low_bytes = [0b0000_1100, 0b0000_0010, ...]
+    // example comma: input = [',', ...] = [0x2c, ...], low_bytes = [0x0c, ...]
     uint8x16_t mask = vdupq_n_u8(0x0f);
     uint8x16_t low_bytes = vandq_u8(input, mask);
     // Apply `b >> 4` to each input byte
+    // example: input = 0b0011_1100, high_bytes = 0b0000_0011
+    // example comma: input = [',', ...] = [0x2c, ...], high_bytes = [0x02, ...]
     uint8x16_t high_bytes = vshrq_n_u8(input, 4);
 
-    // low_lookup[i] = low_nibbles[low_byes[i]]
+    // low_lookup[i] = low_nibbles[low_bytes[i]]
+    // example comma: low_bytes = [0x0c, ...], low_lookup = [CAT_COMMA, ...] = [0b0000_0001,...]
     uint8x16_t low_lookup = vqtbl1q_u8(low_nibbles, low_bytes);
-    // high_lookup[i] = high_nibbles[high_byes[i]]
+    // high_lookup[i] = high_nibbles[high_bytes[i]]
+    // example comma: high_bytes = [0x02, ...], high_lookup = [CAT_COMMA | CAT_SPACE, ...] = [0b0001_0001]
     uint8x16_t high_lookup = vqtbl1q_u8(high_nibbles, high_bytes);
 
     // low_lookup[i] & high_lookup[i]
+    // example comma: (low_lookup = [CAT_COMMA, ...] & high_lookup = [CAT_COMMA | CAT_SPACE, ...]) = [CAT_COMMA, ...]
     return vandq_u8(low_lookup, high_lookup);
 }
 
+// example comma: classified = [CAT_COMMA, 0x00, ...], return = 0b...01
+uint16_t make_mask(uint8x16_t classified) {
+    uint8x16_t mask = vdupq_n_u8(0);
+    // indicator[i] = if classified[i] == 0 then 0x00 else 0xFF
+    // example comma: classified = [CAT_COMMA, 0x00, ...], indicator = [0xFF, 0x00, ...]
+    uint8x16_t indicator = vcgtq_u8(classified, mask);
+
+    // unload indicator from simd into indicator_out
+    uint8_t indicator_out[16] = {};
+    vst1q_u8(indicator_out, indicator);
+
+    // compress indicator bytes into a 16-bit bitset (1 byte becomes 1 bit).
+    // bits are stored in reverse order so that the trailing zeros gives the correct
+    // index (compatible with the ctz = count trailing zeros instruction)
+    // example comma: indicator_out = [0xFF, 0x00, ...], bitset = 0b...01
+    uint16_t bitset = 0;
+    for (size_t i = 0; i < 16; i++) {
+        bitset |= (indicator_out[i] >> 7) << i;
+    }
+    return bitset;
+}
+
 // This is adapted from _mm_movemask_epi8 in
-//https://developer.arm.com/community/arm-community-blogs/b/servers-and-cloud-computing-blog/posts/porting-x86-vector-bitmask-optimizations-to-arm-neon
+// https://developer.arm.com/community/arm-community-blogs/b/servers-and-cloud-computing-blog/posts/porting-x86-vector-bitmask-optimizations-to-arm-neon
+// example comma: classified = [CAT_COMMA, 0x00, ...], return = 0b...01
 uint16_t make_bitmask(uint8x16_t classified) {
     uint8x16_t indicator = vcgtq_u8(classified, vdupq_n_u8(0));
     uint16x8_t high_bits = vreinterpretq_u16_u8(vshrq_n_u8(indicator, 7));
@@ -90,23 +120,10 @@ uint64_t make_shrn_mask(uint8x16_t classified) {
     return matches & 0x8888888888888888ULL;
 }
 
-size_t get_indices_loop(uint8x16_t classified, uint8_t* indices) {
-    uint8x16_t mask = vdupq_n_u8(0);
-    // indicator[i] = if classified[i] == 0 then 0x00 else 0xFF
-    uint8x16_t indicator = vcgtq_u8(classified, mask);
-
-    uint8_t indicator_out[16] = {};
-    vst1q_u8(indicator_out, indicator);
-
-    // compress indicator bytes into a 16-bit bitset (1 byte becomes 1 bit).
-    // bits are stored in reverse order so that the trailing zeros gives the correct
-    // index (compatible with the ctz = count trailing zeros instruction)
-    uint16_t bitset = 0;
-    for (size_t i = 0; i < 16; i++) {
-        bitset |= (indicator_out[i] >> 7) << i;
-    }
-
-    // extract the indices of the set bits in the bitset
+// extract the indices of the set bits in the bitset
+// example: bitset = 0b0100_0000_0001_0000, indices = [4, 14], num_indices = 2
+// example comma: bitset = 0b...01, indices[0] = 0
+size_t get_indices16(uint16_t bitset, uint8_t* indices) {
     size_t num_indices = 0;
     while (bitset != 0) {
         uint8_t idx = __builtin_ctz(bitset);
@@ -117,21 +134,7 @@ size_t get_indices_loop(uint8x16_t classified, uint8_t* indices) {
     return num_indices;
 }
 
-size_t get_indices_movemask(uint8x16_t classified, uint8_t* indices) {
-    uint16_t bitset = make_bitmask(classified);
-
-    size_t num_indices = 0;
-    while (bitset != 0) {
-        uint8_t idx = __builtin_ctz(bitset);
-        indices[num_indices++] = idx;
-        bitset &= bitset - 1;
-    }
-    return num_indices;
-}
-
-size_t get_indices_shrn(uint8x16_t classified, uint8_t* indices) {
-    uint64_t bitset = make_shrn_mask(classified);
-
+size_t get_indices64(uint64_t bitset, uint8_t* indices) {
     size_t num_indices = 0;
     while (bitset != 0) {
         uint8_t idx = __builtin_ctzll(bitset) >> 2;
@@ -141,8 +144,23 @@ size_t get_indices_shrn(uint8x16_t classified, uint8_t* indices) {
     return num_indices;
 }
 
+size_t get_indices_loop(uint8x16_t classified, uint8_t* indices) {
+    uint16_t bitset = make_mask(classified);
+    return get_indices16(bitset, indices);
+}
+
+size_t get_indices_movemask(uint8x16_t classified, uint8_t* indices) {
+    uint16_t bitset = make_bitmask(classified);
+    return get_indices16(bitset, indices);
+}
+
+size_t get_indices_shrn(uint8x16_t classified, uint8_t* indices) {
+    uint64_t bitset = make_shrn_mask(classified);
+    return get_indices64(bitset, indices);
+}
+
 int main(void) {
-    uint8_t input[16] = "hello[world,foo ";
+    uint8_t input[16] = "{\"a\":1,\"b\":true}";
     uint8x16_t bytes = vld1q_u8(input);
 
     uint8x16_t classified = classify(bytes);
